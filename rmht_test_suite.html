@@ -194,6 +194,10 @@ input:focus { outline: none; border-color: var(--fire); }
         <label>UNISWAP V3 POOL $RMHT/WETH</label>
         <input id="poolAddr" value="" placeholder="0x... (laisser vide si pas encore créée)" />
       </div>
+      <div class="input-group">
+        <label>RMHTLIQUIDITYCUSTODIAN</label>
+        <input id="custodianAddr" value="" placeholder="0x... (laisser vide si pas encore déployé)" />
+      </div>
     </div>
     <div>
       <div class="input-group">
@@ -203,6 +207,10 @@ input:focus { outline: none; border-color: var(--fire); }
       <div class="input-group">
         <label>CHAINLINK L2 SEQUENCER UPTIME FEED</label>
         <input id="seqFeedAddr" value="" placeholder="0x... (laisser vide si pas encore connu)" />
+      </div>
+      <div class="input-group">
+        <label>NONFUNGIBLEPOSITIONMANAGER (UNISWAP V3)</label>
+        <input id="positionManagerAddr" value="" placeholder="0x... (nécessaire pour vérifier le NFT #tokenId)" />
       </div>
     </div>
   </div>
@@ -291,6 +299,17 @@ input:focus { outline: none; border-color: var(--fire); }
   <div class="t-item" id="n6d">Anti-sandwich même-bloc (lastReceivedBlock)<div class="t-sub">vérification informationnelle</div></div>
 </div>
 
+<!-- PHASE 7 — LIQUIDITY CUSTODIAN (NFT POSITION) -->
+<div class="phase-header"><span class="phase-badge">PHASE 7</span><span class="phase-line"></span></div>
+<div class="test-grid">
+  <div class="t-item" id="n7a">Config Custodian lisible<div class="t-sub">positionManager/owner/feeRecipient/tokenId</div></div>
+  <div class="t-item" id="n7b">positionManager du Custodian cohérent<div class="t-sub">vs NonfungiblePositionManager saisi</div></div>
+  <div class="t-item" id="n7c">Propriétaire réel du NFT cohérent<div class="t-sub">ownerOf(tokenId) vs positionReceived</div></div>
+  <div class="t-item" id="n7d">currentLiquidity() > 0<div class="t-sub">liquidité toujours détenue, jamais réduite</div></div>
+  <div class="t-item" id="n7e">collect() exécutable<div class="t-sub">staticCall — permissionless, aucune tx réelle envoyée</div></div>
+  <div class="t-item" id="n7f">setFeeRecipient protégé onlyOwner<div class="t-sub">revert si non-owner</div></div>
+</div>
+
 <button class="btn" id="runBtn" onclick="runTests()" disabled style="margin-top:10px;">▶ LANCER LES TESTS</button>
 
 <div class="card" style="margin-top:16px;">
@@ -314,9 +333,25 @@ input:focus { outline: none; border-color: var(--fire); }
 // ═══════════════════════════════════════════
 // STATE
 // ═══════════════════════════════════════════
-let provider, signer, signerAddr, rmht, isMainnet = false, networkName = '';
+let provider, signer, signerAddr, rmht, custodian, positionManagerContract, isMainnet = false, networkName = '';
 let passed = 0, failed = 0, skipped = 0, logEntries = [];
-const TOTAL = 27; // total number of t-item checks across all phases (3 + 4×5 + 4 [Phase 6])
+const TOTAL = 33; // total number of t-item checks across all phases (3 + 4×5 + 4 [Phase 6] + 6 [Phase 7])
+
+const CUSTODIAN_ABI = [
+  "function positionManager() view returns (address)",
+  "function tokenId() view returns (uint256)",
+  "function positionReceived() view returns (bool)",
+  "function feeRecipient() view returns (address)",
+  "function owner() view returns (address)",
+  "function currentLiquidity() view returns (uint128)",
+  "function collect() returns (uint256, uint256)",
+  "function setFeeRecipient(address)",
+  "function renounceOwnership()"
+];
+
+const ERC721_MINIMAL_ABI = [
+  "function ownerOf(uint256) view returns (address)"
+];
 
 const RMHT_ABI = [
   "function name() view returns (string)",
@@ -479,6 +514,12 @@ async function connectWallet() {
     if (!rmhtAddr) { log('⚠️ Renseigne l\'adresse du contrat $RMHT avant de connecter.', 'warning'); return; }
     rmht = new ethers.Contract(rmhtAddr, RMHT_ABI, signer);
 
+    const custodianAddr = document.getElementById('custodianAddr').value.trim();
+    custodian = custodianAddr ? new ethers.Contract(custodianAddr, CUSTODIAN_ABI, signer) : null;
+
+    const positionManagerAddr2 = document.getElementById('positionManagerAddr').value.trim();
+    positionManagerContract = positionManagerAddr2 ? new ethers.Contract(positionManagerAddr2, ERC721_MINIMAL_ABI, signer) : null;
+
     log(`Wallet connecté : ${signerAddr}`, 'success');
     log(`Réseau : ${networkName}`, 'success');
 
@@ -533,7 +574,7 @@ async function runTests() {
   logEntries = [];
   clearLogs();
   updateStats();
-  for (const p of ['0','1','2','3','4','5']) {
+  for (const p of ['0','1','2','3','4','5','6','7']) {
     for (const l of ['a','b','c','d']) {
       const el = document.getElementById(`n${p}${l}`);
       if (el) el.className = 't-item';
@@ -563,15 +604,22 @@ async function runTests() {
     } catch(e) { await ko('n0b', `Impossible de lire le contrat — ${e.message}`); }
 
     try {
-      const [vaultSupply, airdropW, marketW, total] = await Promise.all([
-        rmht.VAULT_SUPPLY(), rmht.airdropWallet(), rmht.marketWallet(), rmht.TOTAL_SUPPLY()
+      const [airdropW, marketW, poolAddr0, total] = await Promise.all([
+        rmht.airdropWallet(), rmht.marketWallet(), rmht.uniswapV3Pool(), rmht.TOTAL_SUPPLY()
       ]);
-      const airdropBal = await rmht.balanceOf(airdropW);
-      const marketBal  = await rmht.balanceOf(marketW);
-      const sum = vaultSupply + airdropBal + marketBal;
-      log(`Vault: ${fmt(vaultSupply)} | Airdrop wallet: ${fmt(airdropBal)} | Market wallet: ${fmt(marketBal)}`, 'data');
-      if (sum === total) await ok('n0c', `Allocation cohérente : vault+airdrop+market == TOTAL_SUPPLY`);
-      else await ko('n0c', `Somme des allocations (${fmt(sum)}) ≠ TOTAL_SUPPLY (${fmt(total)})`);
+      // NB : on lit le solde RÉEL du contrat (balanceOf(address(this))) plutôt que la
+      // constante VAULT_SUPPLY — c'est ce que le contrat détient effectivement, et ça
+      // reste correct même après un ou plusieurs milestones (le solde du contrat baisse
+      // au fil des _executeMilestone(), la constante VAULT_SUPPLY, elle, ne bouge jamais).
+      const contractBal = await rmht.balanceOf(rmht.target ?? await rmht.getAddress());
+      const airdropBal   = await rmht.balanceOf(airdropW);
+      const marketBal    = await rmht.balanceOf(marketW);
+      const poolBal      = poolAddr0 !== ethers.ZeroAddress ? await rmht.balanceOf(poolAddr0) : 0n;
+      const sum = contractBal + airdropBal + marketBal + poolBal;
+      log(`Vault (solde contrat): ${fmt(contractBal)} | Airdrop wallet: ${fmt(airdropBal)} | Market wallet: ${fmt(marketBal)} | Pool: ${fmt(poolBal)}`, 'data');
+      if (poolAddr0 === ethers.ZeroAddress) log('ℹ️ Pool pas encore configurée (setConfig() pas encore appelé) — son solde ne peut pas être vérifié séparément et sera absent de la somme si les tokens y ont déjà été déposés.', 'info');
+      if (sum === total) await ok('n0c', `Allocation cohérente : vault+airdrop+market+pool == TOTAL_SUPPLY`);
+      else await ko('n0c', `Somme des allocations (${fmt(sum)}) ≠ TOTAL_SUPPLY (${fmt(total)}) — écart de ${fmt(total > sum ? total - sum : sum - total)} RMHT à localiser`);
     } catch(e) { await ko('n0c', `Erreur lecture allocation — ${e.message}`); }
 
     // ─────────────────────────────────────────
@@ -804,6 +852,98 @@ async function runTests() {
           skip('n6d', `Aucune réception détectée dans le bloc courant (${currentBlock}) pour ce wallet — mécanisme non déclenché actuellement (vérifié par ailleurs via Echidna, cf. rapport séparé). lastReceivedBlock(wallet) = ${lastRecv}`);
         }
       } catch(e) { skip('n6d', `Lecture lastReceivedBlock non concluante — ${e.message}`); }
+    }
+
+    // ─────────────────────────────────────────
+    // PHASE 7 — LIQUIDITY CUSTODIAN (NFT POSITION)
+    // ─────────────────────────────────────────
+    log('', 'info'); log('[ PHASE 7 ] LIQUIDITY CUSTODIAN (NFT POSITION)', 'section');
+
+    if (!custodian) {
+      skip('n7a', `Adresse du Custodian non renseignée — Phase 7 non exécutée`);
+      skip('n7b', 'dépend de n7a'); skip('n7c', 'dépend de n7a');
+      skip('n7d', 'dépend de n7a'); skip('n7e', 'dépend de n7a'); skip('n7f', 'dépend de n7a');
+    } else {
+      let custodianPM, custodianTokenId, custodianReceived, custodianOwner, custodianFeeRecipient;
+      try {
+        [custodianPM, custodianTokenId, custodianReceived, custodianOwner, custodianFeeRecipient] = await Promise.all([
+          custodian.positionManager(), custodian.tokenId(), custodian.positionReceived(),
+          custodian.owner(), custodian.feeRecipient()
+        ]);
+        log(`Custodian — positionManager: ${custodianPM} | tokenId: ${custodianTokenId} | positionReceived: ${custodianReceived} | feeRecipient: ${custodianFeeRecipient}`, 'data');
+        await ok('n7a', `Config Custodian lisible — positionReceived=${custodianReceived}`);
+      } catch(e) { await ko('n7a', `Erreur lecture config Custodian — ${e.message}`); }
+
+      // n7b — cohérence entre le positionManager déclaré par le Custodian et celui saisi
+      const positionManagerAddrInput = document.getElementById('positionManagerAddr').value.trim();
+      if (custodianPM === undefined) {
+        skip('n7b', 'dépend de n7a');
+      } else if (!positionManagerAddrInput) {
+        skip('n7b', `Adresse NonfungiblePositionManager non saisie — comparaison impossible`);
+      } else if (custodianPM.toLowerCase() === positionManagerAddrInput.toLowerCase()) {
+        await ok('n7b', `positionManager() du Custodian correspond à l'adresse saisie`);
+      } else {
+        await ko('n7b', `positionManager() du Custodian (${custodianPM}) ≠ adresse saisie (${positionManagerAddrInput})`);
+      }
+
+      // n7c — le vrai propriétaire on-chain du NFT (ownerOf) doit être cohérent avec positionReceived :
+      // si positionReceived == true, le NFT doit appartenir au Custodian lui-même (dépôt confirmé,
+      // irréversible par design — cf. absence volontaire de fonction de sortie dans ce contrat).
+      // Si positionReceived == false, le NFT est encore ailleurs (ex. wallet fondateur) — informationnel.
+      if (custodianReceived === undefined) {
+        skip('n7c', 'dépend de n7a');
+      } else if (!positionManagerContract) {
+        skip('n7c', `Adresse NonfungiblePositionManager non saisie — ownerOf(tokenId) non vérifiable`);
+      } else {
+        try {
+          const realOwner = await positionManagerContract.ownerOf(custodianTokenId);
+          const custodianAddrResolved = custodian.target ?? await custodian.getAddress();
+          if (custodianReceived) {
+            if (realOwner.toLowerCase() === custodianAddrResolved.toLowerCase()) {
+              await ok('n7c', `ownerOf(#${custodianTokenId}) == Custodian ✓ (dépôt confirmé et irréversible par design)`);
+            } else {
+              await ko('n7c', `⚠️ positionReceived=true MAIS ownerOf(#${custodianTokenId}) = ${realOwner} ≠ Custodian — incohérence à examiner d'urgence`);
+            }
+          } else {
+            log(`NFT #${custodianTokenId} pas encore transféré — propriétaire actuel on-chain : ${realOwner}`, 'info');
+            await ok('n7c', `Cohérent : positionReceived=false et le NFT est bien encore détenu ailleurs (${realOwner.slice(0,10)}...)`);
+          }
+        } catch(e) { await ko('n7c', `ownerOf(tokenId) a échoué — ${e.reason || e.message}`); }
+      }
+
+      // n7d — la liquidité ne peut, par construction du contrat, que rester constante ou nulle
+      // avant dépôt ; ce test confirme juste qu'elle est bien positive une fois le NFT reçu.
+      if (custodianReceived === true) {
+        try {
+          const liq = await custodian.currentLiquidity();
+          log(`currentLiquidity() = ${liq}`, 'data');
+          if (liq > 0n) await ok('n7d', `currentLiquidity() > 0 (${liq}) — position toujours intacte`);
+          else await ko('n7d', `⚠️ currentLiquidity() == 0 alors que positionReceived=true — liquidité aurait disparu ?`);
+        } catch(e) { await ko('n7d', `currentLiquidity() a échoué — ${e.reason || e.message}`); }
+      } else {
+        skip('n7d', `positionReceived=false — pas encore de position à mesurer`);
+      }
+
+      // n7e — collect() est permissionless par design (n'importe qui peut déclencher la collecte,
+      // seule la destination feeRecipient est contrôlée). On vérifie juste qu'un appel ne revert pas,
+      // via staticCall pour ne PAS envoyer de vraie transaction ni bouger de fonds à ce stade du test.
+      if (custodianReceived === true) {
+        try {
+          const [amount0, amount1] = await custodian.collect.staticCall();
+          await ok('n7e', `collect() exécutable (staticCall) — amount0=${amount0}, amount1=${amount1} (frais actuellement collectables)`);
+        } catch(e) { await ko('n7e', `collect() a revert — ${e.reason || e.message}`); }
+      } else {
+        skip('n7e', `positionReceived=false — rien à collecter avant dépôt du NFT`);
+      }
+
+      // n7f — setFeeRecipient protégé onlyOwner
+      if (custodianOwner === undefined) {
+        skip('n7f', 'dépend de n7a');
+      } else if (custodianOwner.toLowerCase() !== signerAddr.toLowerCase()) {
+        await shouldRevert(() => custodian.setFeeRecipient.staticCall(signerAddr), 'n7f', 'setFeeRecipient() par un non-owner (Custodian)');
+      } else {
+        skip('n7f', `Wallet connecté est owner du Custodian — test "revert si non-owner" non applicable depuis ce wallet`);
+      }
     }
 
     log('', 'info');
