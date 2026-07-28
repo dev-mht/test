@@ -188,29 +188,37 @@ input:focus { outline: none; border-color: var(--fire); }
     <div>
       <div class="input-group">
         <label>$RMHT CONTRACT (TESTNET)</label>
-        <input id="rmhtAddr" value="" placeholder="0x..." />
+        <input id="rmhtAddr" value="0xf9B7353a386E9fad8bf39a23dbCDb7dff67638C0" placeholder="0x..." />
       </div>
       <div class="input-group">
         <label>UNISWAP V3 POOL $RMHT/WETH</label>
-        <input id="poolAddr" value="" placeholder="0x... (laisser vide si pas encore créée)" />
+        <input id="poolAddr" value="0x5142256E42eB273eA06D69da32Eca6b2d4297d54" placeholder="0x... (laisser vide si pas encore créée)" />
       </div>
       <div class="input-group">
         <label>RMHTLIQUIDITYCUSTODIAN</label>
-        <input id="custodianAddr" value="" placeholder="0x... (laisser vide si pas encore déployé)" />
+        <input id="custodianAddr" value="0xd81AD39405579656f3E529195cfDf06cdE8b1DA3" placeholder="0x... (laisser vide si pas encore déployé)" />
+      </div>
+      <div class="input-group">
+        <label>AUTRE WALLET À INCLURE DANS LA RÉCONCILIATION (optionnel, ex: reliquat fondateur)</label>
+        <input id="extraReconciliationWallet" value="" placeholder="0x... (laisser vide si non applicable)" />
       </div>
     </div>
     <div>
       <div class="input-group">
         <label>CHAINLINK ETH/USD FEED</label>
-        <input id="ethUsdFeedAddr" value="" placeholder="0x... (laisser vide si pas encore connu)" />
+        <input id="ethUsdFeedAddr" value="0xB7E5CAB2497Cd2c614ACDcD30F2Fd8f55DC8c454" placeholder="0x... (laisser vide si pas encore connu)" />
       </div>
       <div class="input-group">
         <label>CHAINLINK L2 SEQUENCER UPTIME FEED</label>
-        <input id="seqFeedAddr" value="" placeholder="0x... (laisser vide si pas encore connu)" />
+        <input id="seqFeedAddr" value="0x6c52bCD493ea2A1C0A9b793024C782D482e68B92" placeholder="0x... (laisser vide si pas encore connu)" />
       </div>
       <div class="input-group">
         <label>NONFUNGIBLEPOSITIONMANAGER (UNISWAP V3)</label>
-        <input id="positionManagerAddr" value="" placeholder="0x... (nécessaire pour vérifier le NFT #tokenId)" />
+        <input id="positionManagerAddr" value="0xFFe6CFc4f759b65f9B62c9D05A9E21a78cE93e12" placeholder="0x... (nécessaire pour vérifier le NFT #tokenId)" />
+      </div>
+      <div class="input-group">
+        <label>NFT TOKEN ID ATTENDU (optionnel, avant dépôt dans le Custodian)</label>
+        <input id="expectedTokenId" value="155" placeholder="ex: 155 (laisser vide si déjà transféré au Custodian)" />
       </div>
     </div>
   </div>
@@ -615,11 +623,18 @@ async function runTests() {
       const airdropBal   = await rmht.balanceOf(airdropW);
       const marketBal    = await rmht.balanceOf(marketW);
       const poolBal      = poolAddr0 !== ethers.ZeroAddress ? await rmht.balanceOf(poolAddr0) : 0n;
-      const sum = contractBal + airdropBal + marketBal + poolBal;
-      log(`Vault (solde contrat): ${fmt(contractBal)} | Airdrop wallet: ${fmt(airdropBal)} | Market wallet: ${fmt(marketBal)} | Pool: ${fmt(poolBal)}`, 'data');
+
+      const extraAddr = document.getElementById('extraReconciliationWallet').value.trim();
+      const extraBal  = extraAddr ? await rmht.balanceOf(extraAddr) : 0n;
+
+      const sum = contractBal + airdropBal + marketBal + poolBal + extraBal;
+      log(`Vault (solde contrat): ${fmt(contractBal)} | Airdrop wallet: ${fmt(airdropBal)} | Market wallet: ${fmt(marketBal)} | Pool: ${fmt(poolBal)}${extraAddr ? ` | Autre wallet (${extraAddr.slice(0,10)}...): ${fmt(extraBal)}` : ''}`, 'data');
       if (poolAddr0 === ethers.ZeroAddress) log('ℹ️ Pool pas encore configurée (setConfig() pas encore appelé) — son solde ne peut pas être vérifié séparément et sera absent de la somme si les tokens y ont déjà été déposés.', 'info');
-      if (sum === total) await ok('n0c', `Allocation cohérente : vault+airdrop+market+pool == TOTAL_SUPPLY`);
-      else await ko('n0c', `Somme des allocations (${fmt(sum)}) ≠ TOTAL_SUPPLY (${fmt(total)}) — écart de ${fmt(total > sum ? total - sum : sum - total)} RMHT à localiser`);
+      if (sum === total) await ok('n0c', `Allocation cohérente : vault+airdrop+market+pool${extraAddr ? '+autre' : ''} == TOTAL_SUPPLY`);
+      else {
+        const gap = total > sum ? total - sum : sum - total;
+        await ko('n0c', `Somme des allocations (${fmt(sum)}) ≠ TOTAL_SUPPLY (${fmt(total)}) — écart de ${fmt(gap)} RMHT à localiser${!extraAddr ? ' (essaie de renseigner le champ "Autre wallet à inclure" si tu penses savoir où se trouve ce reliquat)' : ''}`);
+      }
     } catch(e) { await ko('n0c', `Erreur lecture allocation — ${e.message}`); }
 
     // ─────────────────────────────────────────
@@ -886,29 +901,34 @@ async function runTests() {
         await ko('n7b', `positionManager() du Custodian (${custodianPM}) ≠ adresse saisie (${positionManagerAddrInput})`);
       }
 
-      // n7c — le vrai propriétaire on-chain du NFT (ownerOf) doit être cohérent avec positionReceived :
-      // si positionReceived == true, le NFT doit appartenir au Custodian lui-même (dépôt confirmé,
-      // irréversible par design — cf. absence volontaire de fonction de sortie dans ce contrat).
-      // Si positionReceived == false, le NFT est encore ailleurs (ex. wallet fondateur) — informationnel.
+      // n7c — le vrai propriétaire on-chain du NFT (ownerOf) doit être cohérent avec positionReceived.
+      // ATTENTION : tant que positionReceived == false, custodian.tokenId() vaut 0 par défaut
+      // (valeur non initialisée en Solidity) — ce n'est PAS un vrai tokenId, et l'appeler sur
+      // ownerOf(0) revert presque toujours ("nonexistent token"). On utilise donc le champ
+      // "NFT Token ID attendu" saisi manuellement pour ce cas, jamais custodian.tokenId().
+      const expectedTokenIdInput = document.getElementById('expectedTokenId').value.trim();
       if (custodianReceived === undefined) {
         skip('n7c', 'dépend de n7a');
       } else if (!positionManagerContract) {
         skip('n7c', `Adresse NonfungiblePositionManager non saisie — ownerOf(tokenId) non vérifiable`);
-      } else {
+      } else if (custodianReceived) {
         try {
           const realOwner = await positionManagerContract.ownerOf(custodianTokenId);
           const custodianAddrResolved = custodian.target ?? await custodian.getAddress();
-          if (custodianReceived) {
-            if (realOwner.toLowerCase() === custodianAddrResolved.toLowerCase()) {
-              await ok('n7c', `ownerOf(#${custodianTokenId}) == Custodian ✓ (dépôt confirmé et irréversible par design)`);
-            } else {
-              await ko('n7c', `⚠️ positionReceived=true MAIS ownerOf(#${custodianTokenId}) = ${realOwner} ≠ Custodian — incohérence à examiner d'urgence`);
-            }
+          if (realOwner.toLowerCase() === custodianAddrResolved.toLowerCase()) {
+            await ok('n7c', `ownerOf(#${custodianTokenId}) == Custodian ✓ (dépôt confirmé et irréversible par design)`);
           } else {
-            log(`NFT #${custodianTokenId} pas encore transféré — propriétaire actuel on-chain : ${realOwner}`, 'info');
-            await ok('n7c', `Cohérent : positionReceived=false et le NFT est bien encore détenu ailleurs (${realOwner.slice(0,10)}...)`);
+            await ko('n7c', `⚠️ positionReceived=true MAIS ownerOf(#${custodianTokenId}) = ${realOwner} ≠ Custodian — incohérence à examiner d'urgence`);
           }
-        } catch(e) { await ko('n7c', `ownerOf(tokenId) a échoué — ${e.reason || e.message}`); }
+        } catch(e) { await ko('n7c', `ownerOf(#${custodianTokenId}) a échoué — ${e.reason || e.message}`); }
+      } else if (!expectedTokenIdInput) {
+        skip('n7c', `positionReceived=false et tokenId() du Custodian vaut 0 par défaut (pas encore initialisé) — renseigne le champ "NFT Token ID attendu" pour vérifier où se trouve le NFT avant son transfert`);
+      } else {
+        try {
+          const realOwner = await positionManagerContract.ownerOf(expectedTokenIdInput);
+          log(`NFT #${expectedTokenIdInput} pas encore transféré au Custodian — propriétaire actuel on-chain : ${realOwner}`, 'info');
+          await ok('n7c', `Cohérent : positionReceived=false et le NFT #${expectedTokenIdInput} est bien encore détenu ailleurs (${realOwner.slice(0,10)}...), pas par le Custodian`);
+        } catch(e) { await ko('n7c', `ownerOf(#${expectedTokenIdInput}) a échoué — ${e.reason || e.message} (vérifie que ce tokenId existe bien)`); }
       }
 
       // n7d — la liquidité ne peut, par construction du contrat, que rester constante ou nulle
