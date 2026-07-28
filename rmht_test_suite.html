@@ -222,7 +222,7 @@ input:focus { outline: none; border-color: var(--fire); }
       </div>
       <div class="input-group">
         <label>SWAP ROUTER (UNISWAP V3)</label>
-        <input id="swapRouterAddr" value="" placeholder="0x... (SwapRouter ou SwapRouter02, requis pour la section Swap manuel)" />
+        <input id="swapRouterAddr" value="0xb79cB26e90EBBD9bC02c75267c9a86dBa1AFedB7" placeholder="0x... (SwapRouter02, requis pour la section Swap manuel)" />
       </div>
       <div class="input-group">
         <label>WETH ADDRESS (token0 de la pool)</label>
@@ -425,7 +425,7 @@ const ERC20_MINIMAL_ABI = [
 // ISwapRouter (Uniswap v3-periphery, avec deadline). Si le router déployé est
 // un SwapRouter02 (sans champ deadline dans le struct), dis-le et j'ajusterai l'ABI.
 const SWAP_ROUTER_ABI = [
-  "function exactInputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 deadline,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)"
+  "function exactInputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)"
 ];
 
 const RMHT_ABI = [
@@ -1125,10 +1125,13 @@ async function executeSwap() {
     log(`ℹ️ amountOutMinimum = 0 (pas de calcul de prix on-page) — le champ slippage n'est pas encore appliqué automatiquement.`, 'warning');
 
     const router = new ethers.Contract(swapRouterAddr, SWAP_ROUTER_ABI, signer);
-    const deadline = Math.floor(Date.now() / 1000) + 600;
+    // SwapRouter02 (contrairement à ISwapRouter classique) n'a pas de champ deadline
+    // dans ExactInputSingleParams — confirmé par l'ABI on-chain du contrat vérifié
+    // 0xb79cB26e90EBBD9bC02c75267c9a86dBa1AFedB7. La gestion du délai se fait via
+    // le multicall(deadline, data[]) englobant, pas ici.
     const params = {
       tokenIn: fromAddr, tokenOut: toAddr, fee: 10000,
-      recipient: signerAddr, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n
+      recipient: signerAddr, amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n
     };
     log(`Swap en cours : ${amountInStr} ${fromLabel} → ${toLabel} (fee=10000)`, 'info');
     const tx = await router.exactInputSingle(params);
