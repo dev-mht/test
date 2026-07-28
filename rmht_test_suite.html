@@ -220,6 +220,14 @@ input:focus { outline: none; border-color: var(--fire); }
         <label>NFT TOKEN ID ATTENDU (optionnel, avant dépôt dans le Custodian)</label>
         <input id="expectedTokenId" value="155" placeholder="ex: 155 (laisser vide si déjà transféré au Custodian)" />
       </div>
+      <div class="input-group">
+        <label>SWAP ROUTER (UNISWAP V3)</label>
+        <input id="swapRouterAddr" value="" placeholder="0x... (SwapRouter ou SwapRouter02, requis pour la section Swap manuel)" />
+      </div>
+      <div class="input-group">
+        <label>WETH ADDRESS (token0 de la pool)</label>
+        <input id="wethAddr" value="0x7943e237c7F95DA44E0301572D358911207852Fa" placeholder="0x..." />
+      </div>
     </div>
   </div>
   <div class="input-group" style="margin-top:4px;">
@@ -318,6 +326,51 @@ input:focus { outline: none; border-color: var(--fire); }
   <div class="t-item" id="n7f">setFeeRecipient protégé onlyOwner<div class="t-sub">revert si non-owner</div></div>
 </div>
 
+<!-- SWAP MANUEL — hors suite automatisée, envoie de vraies transactions -->
+<div class="phase-header"><span class="phase-badge" style="border-color:var(--blue); color:var(--blue);">SWAP MANUEL</span><span class="phase-line"></span></div>
+<div class="card">
+  <div class="info-box">
+    ⚠️ <strong>Cette section n'appartient PAS à la suite de tests automatisée</strong> (elle ne compte pas dans le score
+    PASS/FAIL). Elle envoie de <strong>vraies transactions</strong> (approve + swap) une fois que tu cliques les boutons.<br>
+    Vérifie <code>isTradingOpen()</code> avant d'essayer — un swap avant <code>launchTime</code> va simplement revert.<br>
+    <strong>amountOutMinimum est fixé à 0</strong> (aucun calcul de prix indépendant fait sur cette page) — acceptable pour
+    un test ponctuel sur une pool testnet à faible liquidité, mais à ne jamais faire tel quel sur mainnet (risque de sandwich).
+  </div>
+  <div class="grid2">
+    <div>
+      <div class="input-group">
+        <label>DIRECTION</label>
+        <select id="swapDirection" style="width:100%; background:#111; border:1px solid #222; color:var(--text); padding:9px 12px; border-radius:4px; font-family:'JetBrains Mono',monospace; font-size:0.78rem;">
+          <option value="wethToRmht">WETH → RMHT</option>
+          <option value="rmhtToWeth">RMHT → WETH</option>
+        </select>
+      </div>
+      <div class="input-group">
+        <label>MONTANT À ENVOYER (unités humaines, ex: 0.001)</label>
+        <input id="swapAmountIn" value="0.001" placeholder="ex: 0.001" />
+      </div>
+      <div class="input-group">
+        <label>SLIPPAGE TOLÉRÉ (%) — informationnel pour l'instant</label>
+        <input id="swapSlippage" value="5" placeholder="ex: 5" />
+      </div>
+    </div>
+    <div>
+      <div class="input-group" style="margin-bottom: 14px;">
+        <label>&nbsp;</label>
+        <button class="btn-sm" onclick="checkTradingOpen()">🔍 VÉRIFIER isTradingOpen()</button>
+      </div>
+      <div class="input-group" style="margin-bottom: 14px;">
+        <label>&nbsp;</label>
+        <button class="btn-sm" onclick="approveForSwap()">1️⃣ APPROVE (autoriser le SwapRouter)</button>
+      </div>
+      <div class="input-group">
+        <label>&nbsp;</label>
+        <button class="btn" onclick="executeSwap()">2️⃣ EXÉCUTER LE SWAP (exactInputSingle)</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <button class="btn" id="runBtn" onclick="runTests()" disabled style="margin-top:10px;">▶ LANCER LES TESTS</button>
 
 <div class="card" style="margin-top:16px;">
@@ -359,6 +412,20 @@ const CUSTODIAN_ABI = [
 
 const ERC721_MINIMAL_ABI = [
   "function ownerOf(uint256) view returns (address)"
+];
+
+const ERC20_MINIMAL_ABI = [
+  "function approve(address,uint256) returns (bool)",
+  "function allowance(address,address) view returns (uint256)",
+  "function balanceOf(address) view returns (uint256)",
+  "function decimals() view returns (uint8)",
+  "function symbol() view returns (string)"
+];
+
+// ISwapRouter (Uniswap v3-periphery, avec deadline). Si le router déployé est
+// un SwapRouter02 (sans champ deadline dans le struct), dis-le et j'ajusterai l'ABI.
+const SWAP_ROUTER_ABI = [
+  "function exactInputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 deadline,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96)) payable returns (uint256 amountOut)"
 ];
 
 const RMHT_ABI = [
@@ -988,6 +1055,87 @@ async function runTests() {
   document.getElementById('exportBtn').disabled = false;
   document.getElementById('runBtn').disabled = false;
   updateStats();
+}
+
+// ═══════════════════════════════════════════
+// SWAP MANUEL (hors suite automatisée)
+// ═══════════════════════════════════════════
+function getSwapTokens() {
+  const direction = document.getElementById('swapDirection').value;
+  const rmhtAddr = document.getElementById('rmhtAddr').value.trim();
+  const wethAddr = document.getElementById('wethAddr').value.trim();
+  if (direction === 'wethToRmht') return { fromAddr: wethAddr, toAddr: rmhtAddr, fromLabel: 'WETH', toLabel: 'RMHT' };
+  return { fromAddr: rmhtAddr, toAddr: wethAddr, fromLabel: 'RMHT', toLabel: 'WETH' };
+}
+
+async function checkTradingOpen() {
+  try {
+    if (!rmht) { log('Connecte d\'abord ton wallet.', 'warning'); return; }
+    const open = await rmht.isTradingOpen();
+    const lt = await rmht.launchTime();
+    const ltDate = new Date(Number(lt) * 1000);
+    if (open) log(`✅ isTradingOpen() = true — trading ouvert (launchTime : ${ltDate.toLocaleString()})`, 'success');
+    else log(`⛔ isTradingOpen() = false — trading pas encore ouvert (launchTime prévu : ${ltDate.toLocaleString()})`, 'warning');
+  } catch(e) { log(`Erreur lecture isTradingOpen() — ${e.reason || e.message}`, 'error'); }
+}
+
+async function approveForSwap() {
+  try {
+    if (!signer) { log('Connecte d\'abord ton wallet.', 'warning'); return; }
+    const swapRouterAddr = document.getElementById('swapRouterAddr').value.trim();
+    if (!swapRouterAddr) { log('⚠️ Renseigne l\'adresse du SwapRouter avant d\'approuver.', 'warning'); return; }
+    const { fromAddr, fromLabel } = getSwapTokens();
+    if (!fromAddr) { log('⚠️ Adresse token manquante (RMHT ou WETH) — vérifie la config.', 'warning'); return; }
+    const tokenContract = new ethers.Contract(fromAddr, ERC20_MINIMAL_ABI, signer);
+    const decimals = await tokenContract.decimals();
+    const amountInStr = document.getElementById('swapAmountIn').value.trim();
+    const amountIn = ethers.parseUnits(amountInStr, decimals);
+    log(`Approve en cours : ${amountInStr} ${fromLabel} → SwapRouter (${swapRouterAddr.slice(0,10)}...)`, 'info');
+    const tx = await tokenContract.approve(swapRouterAddr, amountIn);
+    log(`Tx envoyée : ${tx.hash} — en attente de confirmation...`, 'pending');
+    await tx.wait();
+    log(`✅ Approve confirmé — le SwapRouter peut maintenant dépenser jusqu'à ${amountInStr} ${fromLabel}`, 'success');
+  } catch(e) { log(`Erreur approve — ${e.reason || e.message}`, 'error'); }
+}
+
+async function executeSwap() {
+  try {
+    if (!signer) { log('Connecte d\'abord ton wallet.', 'warning'); return; }
+    const swapRouterAddr = document.getElementById('swapRouterAddr').value.trim();
+    if (!swapRouterAddr) { log('⚠️ Renseigne l\'adresse du SwapRouter avant de swapper.', 'warning'); return; }
+    const { fromAddr, toAddr, fromLabel, toLabel } = getSwapTokens();
+    if (!fromAddr || !toAddr) { log('⚠️ Adresse token manquante (RMHT ou WETH) — vérifie la config.', 'warning'); return; }
+
+    const fromContract = new ethers.Contract(fromAddr, ERC20_MINIMAL_ABI, signer);
+    const decimals = await fromContract.decimals();
+    const amountInStr = document.getElementById('swapAmountIn').value.trim();
+    const amountIn = ethers.parseUnits(amountInStr, decimals);
+
+    const allowance = await fromContract.allowance(signerAddr, swapRouterAddr);
+    if (allowance < amountIn) {
+      log(`⚠️ Allowance insuffisante (${fmt(allowance, decimals)} ${fromLabel} autorisés) — clique d'abord sur APPROVE.`, 'warning');
+      return;
+    }
+
+    // Pas d'oracle de prix indépendant sur cette page pour calculer un amountOutMinimum
+    // fiable à partir du % de slippage saisi → fixé à 0 pour l'instant (tolère 100% de
+    // slippage). Acceptable pour un test isolé sur pool testnet à faible liquidité ;
+    // NE JAMAIS faire ça tel quel sur mainnet (expose à un sandwich attack).
+    const amountOutMinimum = 0n;
+    log(`ℹ️ amountOutMinimum = 0 (pas de calcul de prix on-page) — le champ slippage n'est pas encore appliqué automatiquement.`, 'warning');
+
+    const router = new ethers.Contract(swapRouterAddr, SWAP_ROUTER_ABI, signer);
+    const deadline = Math.floor(Date.now() / 1000) + 600;
+    const params = {
+      tokenIn: fromAddr, tokenOut: toAddr, fee: 10000,
+      recipient: signerAddr, deadline, amountIn, amountOutMinimum, sqrtPriceLimitX96: 0n
+    };
+    log(`Swap en cours : ${amountInStr} ${fromLabel} → ${toLabel} (fee=10000)`, 'info');
+    const tx = await router.exactInputSingle(params);
+    log(`Tx envoyée : ${tx.hash} — en attente de confirmation...`, 'pending');
+    const receipt = await tx.wait();
+    log(`✅ Swap confirmé — bloc ${receipt.blockNumber}. Vérifie le montant reçu via balanceOf() ou l'explorer.`, 'success');
+  } catch(e) { log(`Erreur swap — ${e.reason || e.message}`, 'error'); }
 }
 
 function exportLogs() {
